@@ -819,6 +819,7 @@ function App() {
   const [editingPickup,setEditingPickup] = useState(null);
   const [selectedRoute,setSelectedRoute] = useState(null);
   const [editingRouteStops,setEditingRouteStops] = useState(null);
+  const [editingRouteShipments,setEditingRouteShipments] = useState(null);
   const [dragIdx,setDragIdx] = useState(null);
   const [exporting,setExporting] = useState(false);
   const [cadRate,setCadRate] = useState(DEFAULT_CAD_RATE);
@@ -911,6 +912,32 @@ function App() {
       headers:{"Prefer":"resolution=merge-duplicates"},
       body:JSON.stringify({id:r.id, data:r, updated_at:new Date().toISOString()})
     });
+  }
+
+  async function applyRouteShipmentEdits(newIds){
+    if(!viewRoute) return;
+    const oldIds = viewRoute.shipmentIds || [];
+    const removed = oldIds.filter(id=>!newIds.includes(id));
+    const added   = newIds.filter(id=>!oldIds.includes(id));
+    const updatedShips = shipments.map(s=>{
+      if(removed.includes(s.id)) return {...s, status: s.prevStatus||"at_montreal", prevStatus:undefined};
+      if(added.includes(s.id))   return {...s, prevStatus:s.status, status:"routed"};
+      return s;
+    });
+    setShipments(updatedShips);
+    updatedShips.filter(s=>removed.includes(s.id)||added.includes(s.id)).forEach(s=>saveShipmentCloud(s));
+    const keptStops = (viewRoute.stops||[]).filter(stop=>!removed.includes(stop.shipmentId));
+    const newStops  = added.map(id=>{
+      const sh = updatedShips.find(s=>s.id===id);
+      if(!sh) return null;
+      return {shipmentId:id, city:sh.destCity||"", state:sh.destState||"", client:sh.client||"", jobNo:sh.jobNo||"", cbm:parseFloat(sh.cbm)||0, type:"Delivery"};
+    }).filter(Boolean);
+    const allStops = [...keptStops, ...newStops];
+    const newTotalCBM = newIds.reduce((sum,id)=>{const s=updatedShips.find(x=>x.id===id);return sum+(s?parseFloat(s.cbm)||0:0);},0);
+    const updated = {...viewRoute, shipmentIds:newIds, stops:allStops, totalCBM:newTotalCBM};
+    setRoutes(p=>p.map(r=>r.id===viewRoute.id?updated:r));
+    saveRouteCloud(updated);
+    setEditingRouteShipments(null);
   }
 
   React.useEffect(()=>{ loadFromCloud(); loadPickupsCloud(); },[]);
@@ -2550,6 +2577,9 @@ function App() {
                               <button onClick={()=>setEditingRouteStops([...viewRoute.stops])} style={{padding:"8px 16px",background:C.accent+"15",border:"1px solid "+C.accent+"44",borderRadius:10,color:C.accent,fontWeight:700,cursor:"pointer",fontSize:12}}>
                                 ↕ Reorder Stops
                               </button>
+                              <button onClick={()=>setEditingRouteShipments([...(viewRoute.shipmentIds||[])])} style={{padding:"8px 16px",background:C.rose+"22",border:"1px solid "+C.rose+"55",borderRadius:10,color:C.rose,fontWeight:700,cursor:"pointer",fontSize:12}}>
+                                ✏️ Edit Shipments
+                              </button>
                               <button onClick={()=>handleExport(viewRoute)} disabled={exporting} style={{padding:"8px 18px",background:exporting?C.soft:"linear-gradient(135deg,"+C.rose+","+C.gold+")",border:"none",borderRadius:10,color:exporting?C.muted:"#fff",fontWeight:700,cursor:exporting?"not-allowed":"pointer",fontSize:12}}>
                                 {exporting?"Generating…":"⬇ Export PDF"}
                               </button>
@@ -2558,6 +2588,59 @@ function App() {
                         </div>
                       </div>
                     </Card>
+
+                    {editingRouteShipments&&(()=>{
+                      const currentIds = editingRouteShipments;
+                      const currentShips = currentIds.map(id=>shipments.find(s=>s.id===id)).filter(Boolean);
+                      const availableShips = shipments.filter(s=>!currentIds.includes(s.id)&&s.status!=="released"&&s.status!=="routed");
+                      const newTotalCBM = currentIds.reduce((sum,id)=>{const s=shipments.find(x=>x.id===id);return sum+(s?parseFloat(s.cbm)||0:0);},0);
+                      return(
+                        <Card style={{border:"2px solid "+C.rose+"66",background:"#fff9f8"}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                            <ST color={C.rose}>✏️ Edit Shipments in Route</ST>
+                            <div style={{display:"flex",gap:8}}>
+                              <button onClick={()=>applyRouteShipmentEdits(currentIds)} style={{padding:"8px 18px",background:C.ok,border:"none",borderRadius:10,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:12}}>✓ Save Changes</button>
+                              <button onClick={()=>setEditingRouteShipments(null)} style={{padding:"8px 14px",background:C.soft,border:"1px solid "+C.border,borderRadius:10,color:C.muted,fontWeight:600,cursor:"pointer",fontSize:12}}>Cancel</button>
+                            </div>
+                          </div>
+                          <div style={{fontSize:12,color:C.muted,marginBottom:14}}>New total: <strong style={{color:C.accent}}>{newTotalCBM.toFixed(1)} CBM</strong> — {currentIds.length} shipments</div>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+                            <div>
+                              <div style={{fontWeight:700,fontSize:12,color:C.accent,marginBottom:8}}>📦 In this route ({currentShips.length})</div>
+                              <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:300,overflowY:"auto"}}>
+                                {currentShips.map(s=>(
+                                  <div key={s.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#fff",border:"1.5px solid "+C.border,borderRadius:8,padding:"8px 10px"}}>
+                                    <div>
+                                      <div style={{fontWeight:700,fontSize:12,color:C.accent}}>{s.jobNo||s.id}</div>
+                                      <div style={{fontSize:11,color:C.muted}}>{s.client} · {s.destCity}, {s.destState}</div>
+                                      <div style={{fontSize:11,color:C.gold}}>{parseFloat(s.cbm)||0} CBM</div>
+                                    </div>
+                                    <button onClick={()=>setEditingRouteShipments(p=>p.filter(x=>x!==s.id))} style={{padding:"4px 10px",background:"#fce8e8",border:"1px solid #e88",borderRadius:8,color:"#c44",fontWeight:700,cursor:"pointer",fontSize:11}}>✕ Remove</button>
+                                  </div>
+                                ))}
+                                {currentShips.length===0&&<div style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>No shipments in route</div>}
+                              </div>
+                            </div>
+                            <div>
+                              <div style={{fontWeight:700,fontSize:12,color:"#4a9268",marginBottom:8}}>➕ Available to add ({availableShips.length})</div>
+                              <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:300,overflowY:"auto"}}>
+                                {availableShips.map(s=>(
+                                  <div key={s.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#fff",border:"1.5px solid "+C.border,borderRadius:8,padding:"8px 10px"}}>
+                                    <div>
+                                      <div style={{fontWeight:700,fontSize:12,color:C.accent}}>{s.jobNo||s.id}</div>
+                                      <div style={{fontSize:11,color:C.muted}}>{s.client} · {s.destCity}, {s.destState}</div>
+                                      <div style={{fontSize:11,color:C.gold}}>{parseFloat(s.cbm)||0} CBM · <span style={{color:C.muted}}>{s.status}</span></div>
+                                    </div>
+                                    <button onClick={()=>setEditingRouteShipments(p=>[...p,s.id])} style={{padding:"4px 10px",background:"#e8f5ee",border:"1px solid #8c8",borderRadius:8,color:"#3a7a4a",fontWeight:700,cursor:"pointer",fontSize:11}}>+ Add</button>
+                                  </div>
+                                ))}
+                                {availableShips.length===0&&<div style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>No other shipments available</div>}
+                              </div>
+                            </div>
+                          </div>
+                        </Card>
+                      );
+                    })()}
 
                     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
                       {/* Stops list with drag and drop */}
